@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Camera Consent Demonstration</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: grid; place-items: center;
+      padding: 24px; background: #101827; color: #f8fafc;
+      font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+    }
+    main {
+      width: min(100%, 540px); padding: 28px; border-radius: 18px;
+      background: #1b293b; border: 1px solid #34465f;
+      box-shadow: 0 18px 60px #0005;
+    }
+    h1 { margin: 0 0 10px; font-size: clamp(1.5rem, 5vw, 2rem); }
+    p { color: #cbd5e1; line-height: 1.6; }
+    .notice { padding: 14px 16px; border-radius: 12px; background: #263b55; border-left: 4px solid #60a5fa; }
+    label { display: flex; gap: 12px; align-items: flex-start; margin: 20px 0; color: #f1f5f9; line-height: 1.5; }
+    input[type="checkbox"] { width: 20px; height: 20px; margin-top: 2px; flex: 0 0 auto; }
+    button {
+      width: 100%; border: 0; border-radius: 10px; padding: 14px 18px;
+      background: #3b82f6; color: white; font-size: 1rem; font-weight: 700;
+      cursor: pointer;
+    }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    #status { min-height: 3em; margin: 18px 0 0; color: #bfdbfe; }
+    .small { font-size: .88rem; color: #94a3b8; }
+    /* The video is used internally for capture; it is not shown as a preview. */
+    #camera { position: fixed; width: 1px; height: 1px; opacity: 0; pointer-events: none; left: -10px; top: -10px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Camera Consent Demonstration</h1>
+    <p class="notice"><strong>Please read before continuing:</strong> After you give camera permission, this page will automatically take one photo and send it to the demonstrator's computer. The photo will not be previewed on this phone. Continue only if you agree.</p>
+
+    <label>
+      <input id="consent" type="checkbox">
+      <span>I understand that one photo will be captured automatically and uploaded to the demonstrator's computer, and I consent to this test.</span>
+    </label>
+
+    <button id="start" type="button" disabled>I Consent — Start Camera and Take One Photo</button>
+    <p id="status" role="status" aria-live="polite">Waiting for your consent.</p>
+    <p class="small">The browser will ask for camera permission. You can deny permission or close this page at any time. Your camera's use indicator may remain visible while the camera is active.</p>
+
+    <video id="camera" autoplay playsinline muted></video>
+  </main>
+
+  <script>
+    const consent = document.getElementById('consent');
+    const startButton = document.getElementById('start');
+    const statusText = document.getElementById('status');
+    const video = document.getElementById('camera');
+    let stream = null;
+    let started = false;
+
+    const csrfToken = {{ csrf_token | tojson }};
+
+    consent.addEventListener('change', () => {
+      startButton.disabled = !consent.checked || started;
+    });
+
+    function stopCamera() {
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+        stream = null;
+      }
+      video.srcObject = null;
+    }
+
+    async function captureAndUpload() {
+      if (!video.videoWidth || !video.videoHeight) {
+        throw new Error('The camera did not provide a video frame. Please try again.');
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.88));
+      if (!blob) throw new Error('Could not create the photo.');
+
+      const form = new FormData();
+      form.append('photo', blob, 'consented-photo.jpg');
+
+      const response = await fetch('/upload', {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': csrfToken },
+        body: form
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || 'Upload failed.');
+      return result;
+    }
+
+    startButton.addEventListener('click', async () => {
+      if (!consent.checked || started) return;
+      started = true;
+      startButton.disabled = true;
+      consent.disabled = true;
+
+      try {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw new Error('Camera access requires a supported browser and a secure HTTPS connection.');
+        }
+
+        statusText.textContent = 'Requesting camera permission…';
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: { facingMode: 'user' }
+        });
+
+        video.srcObject = stream;
+        await video.play();
+        if (!video.videoWidth) {
+          await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error('Camera startup timed out.')), 8000);
+            video.onloadeddata = () => { clearTimeout(timeout); resolve(); };
+          });
+        }
+
+        statusText.textContent = 'Camera is active. Capturing one photo automatically in 2 seconds…';
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        statusText.textContent = 'Sending the consented photo securely to the demonstrator’s computer…';
+        await captureAndUpload();
+        statusText.textContent = 'Complete: the photo was received and saved on the demonstrator’s computer. You may close this page.';
+      } catch (error) {
+        statusText.textContent = error.message || 'The test could not be completed.';
+        started = false;
+        startButton.disabled = !consent.checked;
+        consent.disabled = false;
+      } finally {
+        stopCamera();
+      }
+    });
+
+    window.addEventListener('pagehide', stopCamera);
+  </script>
+</body>
+</html>
